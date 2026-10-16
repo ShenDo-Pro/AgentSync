@@ -1,0 +1,14 @@
+[Unit]
+Description=AgentSync Codex session daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/agentsync/daemon.env
+ExecStart=%h/.local/bin/agentsync daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

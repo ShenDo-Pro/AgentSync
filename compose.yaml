@@ -1,0 +1,15 @@
+services:
+  cloud:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      AGENTSYNC_TOKEN: ${AGENTSYNC_TOKEN:?Set AGENTSYNC_TOKEN in .env}
+      AGENTSYNC_DB: /data/cloud.db
+      AGENTSYNC_BIND: 0.0.0.0
+    volumes:
+      - agentsync-cloud:/data
+    restart: unless-stopped
+
+volumes:
+  agentsync-cloud:
