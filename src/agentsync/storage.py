@@ -2,11 +2,14 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 
-def connect(path: str) -> sqlite3.Connection:
+@contextmanager
+def connect(path: str) -> Iterator[sqlite3.Connection]:
     """Open a durable SQLite connection."""
     database = Path(path).expanduser()
     database.parent.mkdir(parents=True, exist_ok=True)
@@ -14,7 +17,14 @@ def connect(path: str) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA busy_timeout=15000")
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def init_local(db: sqlite3.Connection) -> None:
