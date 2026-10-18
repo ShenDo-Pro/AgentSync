@@ -22,6 +22,12 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("sync")
     sub.add_parser("hook")
     sub.add_parser("install-codebuddy")
+    import_parser = sub.add_parser("import-codebuddy", help="Import a Codex rollout into closed CodeBuddyCN")
+    import_parser.add_argument("rollout", type=Path)
+    import_parser.add_argument("--history-dir", type=Path)
+    import_parser.add_argument("--backup-dir", type=Path, default=Path.home() / ".agentsync/backups")
+    import_parser.add_argument("--name", default="")
+    import_parser.add_argument("--activate", action="store_true")
     project_parser = sub.add_parser("project")
     project_parser.add_argument("path", nargs="?", default=".")
     handoff_parser = sub.add_parser("handoff")
@@ -51,6 +57,12 @@ def main(argv: list[str] | None = None) -> None:
         hook_main()
     elif args.command == "install-codebuddy":
         print(install_hook())
+    elif args.command == "import-codebuddy":
+        from .codebuddy_history import build_snapshot, discover_history, import_snapshot
+        snapshot = build_snapshot(args.rollout, args.name)
+        history_dir = args.history_dir or discover_history(snapshot["source"]["workspace"])
+        result = import_snapshot(snapshot, history_dir, args.backup_dir, args.activate)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
     elif args.command == "project":
         project = resolve_project(args.path)
         print(json.dumps(project.__dict__ if project else None, ensure_ascii=False))

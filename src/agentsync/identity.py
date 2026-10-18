@@ -1,6 +1,7 @@
 """Stable Git project identity shared by local and SSH workspaces."""
 
 import hashlib
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ def _git(cwd: str, *args: str) -> str:
         ["git", "-C", cwd, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         timeout=5,
         check=False,
     )

@@ -47,8 +47,9 @@ def scan(db_path: str, codex_home: Path) -> int:
                     project_id = project.project_id
                     remote = project.remote
                     root = project.root
-                    branch = project.branch
-                    head = project.head
+                    recorded_git = metadata.get("git") or {}
+                    branch = recorded_git.get("branch") or project.branch
+                    head = recorded_git.get("commit_hash") or project.head
                     offset = 0
                 if path.stat().st_size < offset:
                     offset = 0
@@ -62,8 +63,9 @@ def scan(db_path: str, codex_home: Path) -> int:
                                 path.stat().st_mtime, timezone.utc).isoformat()
                         event["project_id"] = project_id
                         event["branch"] = branch
-                        changed |= save_event(db, event)
-                        count += 1
+                        inserted = save_event(db, event)
+                        changed |= inserted
+                        count += int(inserted)
                 if changed:
                     refresh_handoff(db, task_id, project_id, branch, head)
                 save_file_state(db, key, task_id, project_id, remote,
@@ -97,6 +99,7 @@ def flush(db_path: str, cloud_url: str, token: str) -> int:
         return 0
     sent = 0
     with connect(db_path) as db:
+        init_local(db)
         while True:
             batch = pending(db, 100)
             if not batch:

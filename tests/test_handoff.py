@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import sys
 import unittest
 from contextlib import redirect_stdout
 from http.server import ThreadingHTTPServer
@@ -104,6 +105,57 @@ class HandoffTest(unittest.TestCase):
                          normalize_remote("https://github.com/example/project.git"))
         self.assertEqual(resolve_project(str(self.repo)).remote,
                          "github.com/example/project")
+
+    @unittest.skipUnless(os.name == "nt", "Windows background process regression")
+    def test_background_git_never_creates_console(self) -> None:
+        with patch("agentsync.identity.subprocess.run", wraps=subprocess.run) as run:
+            project = resolve_project(str(self.repo))
+        self.assertIsNotNone(project)
+        self.assertGreater(len(run.call_args_list), 0)
+        for call in run.call_args_list:
+            self.assertTrue(call.kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
+
+    def test_scan_preserves_recorded_branch(self) -> None:
+        original = resolve_project(str(self.repo))
+        self.write_session("task-a", "Fix login", "Login fixed")
+        path = next(self.sessions.glob("*.jsonl"))
+        lines = path.read_text(encoding="utf-8").splitlines()
+        meta = json.loads(lines[0])
+        meta["payload"]["git"] = {"branch": original.branch, "commit_hash": original.head}
+        lines[0] = json.dumps(meta)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        git(self.repo, "checkout", "-b", "unrelated")
+        self.assertEqual(scan(self.local_db, self.codex_home), 2)
+        self.assertEqual(handoff(str(self.repo), self.local_db)["status"], "missing")
+        git(self.repo, "checkout", original.branch)
+        result = handoff(str(self.repo), self.local_db)
+        self.assertEqual(result["handoff"]["head"], original.head)
+
+    def test_sync_before_first_scan(self) -> None:
+        self.assertEqual(flush(self.local_db, "http://127.0.0.1:1", "token"), 0)
+
+    def test_hook_subprocess_chinese_with_legacy_encoding(self) -> None:
+        self.write_session("task-a", "修复登录", "登录已修复")
+        scan(self.local_db, self.codex_home)
+        env = {**os.environ, "AGENTSYNC_DB": self.local_db,
+               "AGENTSYNC_CLOUD_URL": "", "AGENTSYNC_TOKEN": "",
+               "PYTHONIOENCODING": "gbk"}
+        result = subprocess.run([sys.executable, "-m", "agentsync.cli", "hook"],
+                                input=json.dumps({"cwd": str(self.repo)}, ensure_ascii=False).encode("utf-8"),
+                                capture_output=True, env=env, check=True)
+        context = json.loads(result.stdout.decode("utf-8"))["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("修复登录", context)
+
+    def test_install_updates_own_hook_preserving_others(self) -> None:
+        path = self.root / "settings.json"
+        path.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
+            {"type": "command", "command": "old-agentsync hook"},
+            {"type": "command", "command": "another-tool"}]}]}}), encoding="utf-8")
+        install_hook(path, '"C:/Program Files/AgentSync/python.exe" hook')
+        install_hook(path, '"C:/Program Files/AgentSync/python.exe" hook')
+        entries = json.loads(path.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+        commands = [h["command"] for entry in entries for h in entry["hooks"]]
+        self.assertEqual(commands, ["another-tool", '"C:/Program Files/AgentSync/python.exe" hook'])
 
     def test_codebuddy_hook_injects_context_once(self) -> None:
         self.write_session("task-a", "Fix login", "Login fixed")

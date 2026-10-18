@@ -3,6 +3,8 @@
 import json
 import os
 import shlex
+import subprocess
+import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import urlencode
@@ -42,7 +44,9 @@ def handoff(cwd: str, db_path: str, cloud_url: str = "",
 def hook_main() -> None:
     """Read CodeBuddy Hook input and emit session context JSON."""
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8")) if hasattr(sys.stdin, "buffer") else json.load(sys.stdin)
+        if not isinstance(data, dict):
+            raise ValueError("Hook input must be a JSON object")
         cwd = data.get("cwd") or os.environ.get("CODEBUDDY_PROJECT_DIR") or os.getcwd()
         result = handoff(cwd, os.environ.get("AGENTSYNC_DB", "~/.agentsync/local.db"),
                          os.environ.get("AGENTSYNC_CLOUD_URL", ""),
@@ -57,18 +61,18 @@ def hook_main() -> None:
                         ", ".join(item["source_event_ids"]), item["summary"]))
             print(json.dumps({"continue": True, "hookSpecificOutput": {
                 "hookEventName": "SessionStart", "additionalContext": context}},
-                ensure_ascii=False))
+                ensure_ascii=True))
         else:
             print(json.dumps({"continue": True}))
             if result.get("status") == "ambiguous":
                 print("AgentSync: multiple Codex tasks match this branch; set AGENTSYNC_TASK_ID to select one.",
                       file=sys.stderr)
-    except (OSError, ValueError, TypeError, KeyError) as error:
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
         print(json.dumps({"continue": True}))
         print("AgentSync hook: %s" % error, file=sys.stderr)
 
 
-def install_hook(settings_path: Path | None = None) -> Path:
+def install_hook(settings_path: Path | None = None, command: str | None = None) -> Path:
     """Add the global CodeBuddy SessionStart Hook once."""
     settings_path = settings_path or Path.home() / ".codebuddy" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,18 +82,26 @@ def install_hook(settings_path: Path | None = None) -> Path:
             raise ValueError("CodeBuddy settings must be a JSON object")
     else:
         settings = {}
-    executable = sys.executable.replace("\\", "/")
-    command = "%s hook" % shlex.quote(executable)
-    if not getattr(sys, "frozen", False):
-        command = "%s -m agentsync.cli hook" % shlex.quote(executable)
+    if command is None:
+        args = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            args.extend(["-X", "utf8", "-m", "agentsync.cli"])
+        args.append("hook")
+        command = subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
     entry = {"matcher": "startup", "hooks": [
         {"type": "command", "command": command, "timeout": 10}]}
     hooks = settings.setdefault("hooks", {})
     startup = hooks.setdefault("SessionStart", [])
-    if not any("agentsync" in json.dumps(value).lower() for value in startup):
-        startup.append(entry)
-        temporary = settings_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
-                             encoding="utf-8")
-        temporary.replace(settings_path)
+    # Replace our commands while retaining other commands in a shared matcher.
+    retained = []
+    for value in startup:
+        other = [hook for hook in value.get("hooks", [])
+                 if "agentsync" not in hook.get("command", "").lower()]
+        if other or not value.get("hooks"):
+            retained.append({**value, "hooks": other})
+    hooks["SessionStart"] = retained + [entry]
+    temporary = settings_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
+    temporary.replace(settings_path)
     return settings_path
