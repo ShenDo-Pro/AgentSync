@@ -1,6 +1,58 @@
 # AgentSync
 
-AgentSync 将同一 Git 项目的 Codex 任务和历史对话交接给 CodeBuddy。当前可在 Windows 本机配合 Codex 与 CodeBuddyCN 使用，无需部署 Cloud，也无需额外 AI API。
+AgentSync 为同一 Git 项目的 Codex、TraeCode/TRAE 和 CodeBuddy 提供本地消息共享、任务接力和跨设备云端增量同步。无需额外 AI API；单机使用无需 Cloud。
+
+## 0.2：双向消息与云端同步
+
+| 来源 / 目标 | 新消息进入 AgentSync | 读取其他工具的消息 |
+| --- | --- | --- |
+| Codex | 自动扫描本地 JSONL | CLI `messages` / `handoff` 或 MCP |
+| CodeBuddyCN | 注册项目历史目录后，自动采集已完成的原生文字消息 | MCP，或新会话 SessionStart Hook |
+| TraeCode / TRAE | Agent 调用 MCP `agentsync_publish` 发布消息 | MCP `agentsync_messages` / `agentsync_handoff` |
+| 另一台设备 | Daemon 自动上传、按项目分页拉取 | 保存到该设备本地数据库，供 CLI / MCP / Hook 使用 |
+
+**双向同步发生在 AgentSync 消息库与 MCP 上，不会实时复制到各 IDE 的原生聊天列表。** Trae 的私有历史数据库当前不支持直接读取；必须由 Agent 调用发布工具，未调用的消息不会自动采集。MCP 读取也由 Agent 调用触发，不会主动往正在聊天的窗口推送气泡。CodeBuddy 原生快照导入仍是下面介绍的独立功能。
+
+### 配置 TraeCode 与 CodeBuddy 互通
+
+安装或更新程序后，在目标 Git 项目目录执行：
+
+```sh
+python -m pip install .
+agentsync watch . --codebuddy-history auto
+agentsync mcp-config
+```
+
+`auto` 根据项目路径匹配已有 CodeBuddyCN 历史目录；没有历史目录时先在 CodeBuddy 打开项目。多个账号匹配时用 `--codebuddy-history "完整历史目录"` 指定。仅使用 MCP 或仅接收云端消息时，执行 `agentsync watch .` 即可；再次注册会替换该项目配置，省略历史目录会停用其原生采集。
+
+把 `mcp-config` 输出中的 `agentsync` 服务配置合并到两款 IDE 的 MCP 配置中，保留其他已有服务。生成配置使用当前 Python/客户端的绝对路径与同一个 `AGENTSYNC_DB`。配置方法参见 [TRAE 官方说明](https://docs.trae.cn/ide_add-mcp-servers) 和 [CodeBuddy 官方说明](https://www.codebuddy.ai/docs/ide/User-guide/MCP)。源码运行也可使用 `python -m agentsync.cli mcp-config`；一键安装用户可通过已有 `$AgentSyncPython` / `$AgentSyncLauncher` 调用这些子命令。
+
+在 IDE 的项目规则中加入以下工作约定（是否调用工具由该 IDE 的 Agent 决定）：
+
+> 开始工作及继续任务前，调用 agentsync_messages 读取当前 Git 项目共享消息，保存 next_cursor，下次用 after 继续读取；has_more 为 true 时继续翻页。将对方消息作为历史上下文。处理新请求后调用 agentsync_publish，分别发布用户请求和助手答复。source 使用 trae 或 codebuddy，同一任务固定 task_id，每条消息使用稳定且唯一的 message_id，重试保持相同 ID，sequence 按消息顺序递增。path 使用本机项目绝对路径。不要将读取到的其他工具消息再发布为新消息。
+
+CodeBuddy 开启原生采集后，通常无需再手动发布相同消息，否则原生 ID 与 MCP ID 不同会产生两条记录。同一消息 ID 内容变化会保留为新修订事件；相同内容重试不会重复。
+
+启动后台同步：
+
+```sh
+agentsync daemon
+# 手动检查
+agentsync scan
+agentsync sync
+agentsync messages . --after 0 --limit 100
+agentsync handoff .
+```
+
+同机两款 IDE 使用同一数据库即可互通。跨设备时在每台设备设置相同的 `AGENTSYNC_CLOUD_URL` 和 `AGENTSYNC_TOKEN`，并执行 `agentsync watch /本机项目路径`；项目 Git origin 应相同。Daemon 默认每 5 秒采集、上传和拉取。`sync` 返回 uploaded / downloaded 数量；离线时保留上传队列，恢复后重试。下载游标按云端地址及项目持久化，拉取数据不重新上传，避免回环。Cloud 升级到 0.2 后提供鉴权接口 `GET /v1/changes?project_id=...&after=0&limit=100`，返回 events / next_cursor / has_more。游标属于对应数据库，不能在本地和云端之间混用；云端数据库应持久保存，重建数据库后需重置客户端 sync_cursors。
+
+CLI 也支持从 UTF-8 stdin 发布单条消息：
+
+```sh
+echo '{"source":"trae","task_id":"login","message_id":"request-1","role":"user","content":"修复登录","sequence":0}' | agentsync publish .
+```
+
+Cloud 的同一令牌共享整套数据，适合个人设备同步，不提供多租户隔离。当前只复制消息和生成交接摘要，不复制 Git 文件或自动切换分支；Git 状态仍可通过 `/v1/project-states` 查询。原生 CodeBuddy 消息没有分支元数据，首次采集按项目当前分支归属，同一任务后续消息保持原归属；历史跨分支会话建议使用独立项目目录采集。
 
 ## 先选择使用方式
 
@@ -9,11 +61,11 @@ AgentSync 将同一 Git 项目的 Codex 任务和历史对话交接给 CodeBuddy
 | 让新会话知道 Codex 最近在做什么 | 一次配置后，后台采集 + SessionStart Hook | 新会话获得最近任务摘要，不新增历史聊天 |
 | 在聊天列表里看到 Codex 的对话，并继续聊天 | 退出 CodeBuddyCN 后运行历史导入命令 | 新增 `[Codex]` 历史会话，包含用户文字、助手答复和可见进度消息 |
 
-**后台采集不等于实时复制历史。** 原生历史目前按快照导入；Codex 后续有新消息，需要再次导入。当前为 Codex → CodeBuddyCN 单向接力，不会把 CodeBuddyCN 的新消息写回 Codex。
+**后台采集不等于实时复制原生历史。** 原生历史目前按快照导入；Codex 后续有新消息，需要再次导入。CodeBuddy 新消息可按上节配置共享给其他工具，但不会写回 Codex 原生会话文件。
 
 ## 当前实现
 
-- Daemon 只读取 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中的 JSONL 会话，提取用户消息和 Codex 最终答复，不写入 AI 工具原生文件。
+- Daemon 读取 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 中的 JSONL 会话，以及已注册的 CodeBuddy 历史，提取用户消息和助手答复，不写入 AI 工具原生文件。
 - 本地 SQLite 保存原始消息记录、来源事件 ID、独立交接摘要、Git HEAD 与受跟踪文件状态，以及待上传队列。Cloud 不可用时继续采集，恢复后重试。
 - 项目 ID 来自规范化的 Git `origin`；任务 ID 使用 Codex 会话 ID，分支参与交接筛选。Hook 默认选择该分支最近更新的独立任务；可以设置 `AGENTSYNC_TASK_ID` 指定较早的任务。
 - CodeBuddy `SessionStart` Hook 从 Cloud 或本地 SQLite 读取交接摘要，自动注入新会话。
@@ -58,7 +110,7 @@ $AgentSyncLauncher = Join-Path $env:USERPROFILE '.agentsync\agentsync-local.py'
 
 配置后，在 CodeBuddyCN 打开相同 Git 项目和分支，新建会话，询问“上一条 Codex 任务是什么？”。
 如已有窗口未加载 Hook，请重新加载窗口后再新建会话。采集间隔默认 5 秒。
-后台 Hook 提供 Codex 到 CodeBuddyCN 的单向任务摘要接力。若需要在聊天列表中看到原始对话，使用下面的历史导入命令。
+后台 Hook 从共享消息库提供最近任务摘要（含已发布的 Trae / CodeBuddy 任务）。若需要在聊天列表中看到 Codex 原始对话，使用下面的历史导入命令。
 
 ## 导入历史对话到 CodeBuddyCN
 

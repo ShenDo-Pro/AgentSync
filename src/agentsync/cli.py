@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from . import cloud, daemon
@@ -22,6 +23,17 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("sync")
     sub.add_parser("hook")
     sub.add_parser("install-codebuddy")
+    sub.add_parser("mcp", help="Serve shared messages to Trae/CodeBuddy over stdio")
+    sub.add_parser("mcp-config", help="Print MCP configuration for IDE settings")
+    watch_parser = sub.add_parser("watch", help="Register a local project for cloud downloads and native collection")
+    watch_parser.add_argument("path", nargs="?", default=".")
+    watch_parser.add_argument("--codebuddy-history", default="", help="History directory or auto")
+    publish_parser = sub.add_parser("publish", help="Publish a portable message JSON object from stdin")
+    publish_parser.add_argument("path", nargs="?", default=".")
+    changes_parser = sub.add_parser("messages", help="Read shared messages after a saved cursor")
+    changes_parser.add_argument("path", nargs="?", default=".")
+    changes_parser.add_argument("--after", type=int, default=0)
+    changes_parser.add_argument("--limit", type=int, default=100)
     import_parser = sub.add_parser("import-codebuddy", help="Import a Codex rollout into closed CodeBuddyCN")
     import_parser.add_argument("rollout", type=Path)
     import_parser.add_argument("--history-dir", type=Path)
@@ -50,9 +62,29 @@ def main(argv: list[str] | None = None) -> None:
         cloud.serve(db_path, token, os.environ.get("AGENTSYNC_BIND", "127.0.0.1"),
                     int(os.environ.get("AGENTSYNC_PORT", "8765")))
     elif args.command == "scan":
-        print(daemon.scan(db_path, codex_home))
+        from .sources import scan_registered
+        print(daemon.scan(db_path, codex_home) + scan_registered(db_path))
     elif args.command == "sync":
-        print(daemon.flush(db_path, cloud_url, token))
+        print(json.dumps(daemon.sync(db_path, cloud_url, token)))
+    elif args.command == "watch":
+        from .sources import register
+        print(json.dumps(register(db_path, args.path, args.codebuddy_history), ensure_ascii=True))
+    elif args.command == "publish":
+        from .messages import publish
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+        print(json.dumps(publish(db_path, args.path, **payload), ensure_ascii=True))
+    elif args.command == "messages":
+        from .mcp import call
+        print(json.dumps(call(db_path, "agentsync_messages", {"path": args.path,
+                         "after": args.after, "limit": args.limit}), ensure_ascii=True, indent=2))
+    elif args.command == "mcp":
+        from .mcp import serve
+        serve(db_path)
+    elif args.command == "mcp-config":
+        command_args = ["mcp"] if getattr(sys, "frozen", False) else ["-X", "utf8", "-m", "agentsync.cli", "mcp"]
+        print(json.dumps({"mcpServers": {"agentsync": {"command": sys.executable,
+              "args": command_args, "env": {"AGENTSYNC_DB": str(Path(db_path).expanduser().resolve()),
+              "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}}}}, ensure_ascii=True, indent=2))
     elif args.command == "hook":
         hook_main()
     elif args.command == "install-codebuddy":

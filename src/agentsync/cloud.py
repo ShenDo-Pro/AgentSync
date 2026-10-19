@@ -4,8 +4,10 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from .messages import changes, validate_event
 
 from .storage import (cloud_save_events, cloud_save_handoff, connect, history,
                       cloud_save_project_state, init_cloud, project_states,
@@ -56,7 +58,15 @@ class CloudHandler(BaseHTTPRequestHandler):
             self._reply(400, {"error": "project_id required"})
             return
         with connect(self.server.db_path) as db:
-            if route.path == "/v1/handoff":
+            if route.path == "/v1/changes":
+                try:
+                    result = changes(db, project_id, int(query.get("after", ["0"])[0]),
+                                     int(query.get("limit", ["100"])[0]))
+                except ValueError as error:
+                    self._reply(400, {"error": str(error)})
+                    return
+                self._reply(200, result)
+            elif route.path == "/v1/handoff":
                 branch = query.get("branch", [""])[0]
                 task_id = query.get("task_id", [""])[0]
                 self._reply(200, select_handoff(db, project_id, branch, task_id))
@@ -84,6 +94,7 @@ class CloudHandler(BaseHTTPRequestHandler):
                     if not isinstance(events, list) or len(events) > 100:
                         raise ValueError("expected at most 100 events")
                     for event in events:
+                        validate_event(event)
                         if not isinstance(event, dict) or event.get("role") not in ("user", "assistant"):
                             raise ValueError("invalid event")
                         if not all(key in event for key in (
@@ -112,7 +123,7 @@ class CloudHandler(BaseHTTPRequestHandler):
                     self._reply(200, {"accepted": True})
                 else:
                     self._reply(404, {"error": "not found"})
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
             self._reply(400, {"error": str(error)})
 
     def log_message(self, format: str, *args: object) -> None:

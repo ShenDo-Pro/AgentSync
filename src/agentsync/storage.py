@@ -136,7 +136,7 @@ def save_project_state(db: sqlite3.Connection, project: object) -> bool:
     return True
 
 
-def save_event(db: sqlite3.Connection, event: dict) -> bool:
+def save_event(db: sqlite3.Connection, event: dict, enqueue: bool = True) -> bool:
     """Store a dialogue event and queue its cloud upload once."""
     cursor = db.execute("""
         INSERT OR IGNORE INTO events
@@ -145,7 +145,7 @@ def save_event(db: sqlite3.Connection, event: dict) -> bool:
         VALUES (:event_id, :project_id, :task_id, :branch, :role, :content, :raw_record,
                 :phase, :source_offset, :source_timestamp)
     """, event)
-    if cursor.rowcount:
+    if cursor.rowcount and enqueue:
         db.execute("""
             INSERT OR IGNORE INTO outbox(kind, item_key, payload)
             VALUES ('event', ?, ?)
@@ -154,22 +154,22 @@ def save_event(db: sqlite3.Connection, event: dict) -> bool:
 
 
 def refresh_handoff(db: sqlite3.Connection, task_id: str, project_id: str,
-                    branch: str, head: str) -> dict | None:
+                    branch: str, head: str, enqueue: bool = True) -> dict | None:
     """Build a source-linked summary from the latest dialogue."""
     rows = db.execute("""
         SELECT rowid, event_id, role, content, source_timestamp FROM events
-        WHERE task_id=? ORDER BY rowid DESC LIMIT 100
+        WHERE task_id=? ORDER BY source_timestamp DESC, source_offset DESC, rowid DESC LIMIT 100
     """, (task_id,)).fetchall()
     user = next((row for row in rows if row["role"] == "user"), None)
     if not user:
         return None
-    assistant = next((row for row in rows if row["role"] == "assistant"
-                      and row["rowid"] > user["rowid"]), None)
+    assistant = next((row for row in rows[:rows.index(user)] if row["role"] == "assistant"), None)
     source_ids = [user["event_id"]]
-    summary = "Codex 最近任务：\n" + user["content"][-4000:]
+    source = task_id.split(":", 1)[0] if ":" in task_id else "Codex"
+    summary = source + " 最近任务：\n" + user["content"][-4000:]
     if assistant:
         source_ids.append(assistant["event_id"])
-        summary += "\n\nCodex 最近答复：\n" + assistant["content"][-4000:]
+        summary += "\n\n" + source + " 最近答复：\n" + assistant["content"][-4000:]
     if head:
         summary += "\n\n记录时的 Git HEAD：" + head
     previous = db.execute("SELECT version, source_event_ids FROM handoffs WHERE task_id=?",
@@ -196,10 +196,11 @@ def refresh_handoff(db: sqlite3.Connection, task_id: str, project_id: str,
             summary=excluded.summary, source_event_ids=excluded.source_event_ids,
             version=excluded.version, updated_at=excluded.updated_at
     """, {**handoff, "encoded_ids": encoded_ids})
-    db.execute("""
-        INSERT INTO outbox(kind, item_key, payload) VALUES ('handoff', ?, ?)
-        ON CONFLICT(kind, item_key) DO UPDATE SET payload=excluded.payload
-    """, (task_id, json.dumps(handoff, ensure_ascii=False)))
+    if enqueue:
+        db.execute("""
+            INSERT INTO outbox(kind, item_key, payload) VALUES ('handoff', ?, ?)
+            ON CONFLICT(kind, item_key) DO UPDATE SET payload=excluded.payload
+        """, (task_id, json.dumps(handoff, ensure_ascii=False)))
     return handoff
 
 
@@ -213,6 +214,13 @@ def acknowledge(db: sqlite3.Connection, queue_ids: list[int]) -> None:
     if queue_ids:
         db.executemany("DELETE FROM outbox WHERE queue_id=?", [(i,) for i in queue_ids])
         db.commit()
+
+
+def acknowledge_batch(db: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
+    """Do not delete a newer payload queued while an HTTP request was in flight."""
+    db.executemany("DELETE FROM outbox WHERE queue_id=? AND payload=?",
+                   [(row["queue_id"], row["payload"]) for row in rows])
+    db.commit()
 
 
 def cloud_save_events(db: sqlite3.Connection, events: list[dict]) -> None:

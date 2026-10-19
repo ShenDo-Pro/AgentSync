@@ -11,7 +11,9 @@ from urllib.request import Request, urlopen
 
 from .codex import dialogue_event, new_lines, rollout_files, session_metadata
 from .identity import resolve_project
-from .storage import (acknowledge, connect, file_state, init_local, pending,
+from .replication import pull
+from .sources import registrations, scan_registered
+from .storage import (acknowledge_batch, connect, file_state, init_local, pending,
                       refresh_handoff, save_event, save_file_state,
                       save_project_state)
 
@@ -114,14 +116,14 @@ def flush(db_path: str, cloud_url: str, token: str) -> int:
                     for row in same_kind:
                         _post(cloud_url.rstrip("/") + "/v1/handoffs", token,
                               {"handoff": json.loads(row["payload"])})
-                        acknowledge(db, [row["queue_id"]])
+                        acknowledge_batch(db, [row])
                         sent += 1
                     continue
                 elif first_kind == "state":
                     for row in same_kind:
                         _post(cloud_url.rstrip("/") + "/v1/project-states", token,
                               {"state": json.loads(row["payload"])})
-                        acknowledge(db, [row["queue_id"]])
+                        acknowledge_batch(db, [row])
                         sent += 1
                     continue
                 else:
@@ -129,9 +131,23 @@ def flush(db_path: str, cloud_url: str, token: str) -> int:
             except (OSError, HTTPError, URLError, ValueError) as error:
                 LOG.warning("Cloud upload postponed: %s", error)
                 break
-            acknowledge(db, [row["queue_id"] for row in same_kind])
+            acknowledge_batch(db, same_kind)
             sent += len(same_kind)
     return sent
+
+
+def sync(db_path: str, cloud_url: str, token: str) -> dict:
+    uploaded = flush(db_path, cloud_url, token)
+    downloaded = 0
+    projects = {item["project_id"] for item in registrations(db_path)}
+    with connect(db_path) as db:
+        projects.update(row[0] for row in db.execute("SELECT DISTINCT project_id FROM events"))
+    for project_id in projects:
+        try:
+            downloaded += pull(db_path, cloud_url, token, project_id)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            LOG.warning("Cloud download postponed for %s: %s", project_id, error)
+    return {"uploaded": uploaded, "downloaded": downloaded}
 
 
 def run(db_path: str, codex_home: Path, cloud_url: str,
@@ -139,10 +155,10 @@ def run(db_path: str, codex_home: Path, cloud_url: str,
     """Continuously scan Codex sessions and retry offline uploads."""
     while True:
         try:
-            collected = scan(db_path, codex_home)
-            uploaded = flush(db_path, cloud_url, token)
-            if collected or uploaded:
-                LOG.info("Collected %d records; uploaded %d items", collected, uploaded)
+            collected = scan(db_path, codex_home) + scan_registered(db_path)
+            result = sync(db_path, cloud_url, token)
+            if collected or any(result.values()):
+                LOG.info("Collected %d records; sync %s", collected, result)
         except (OSError, ValueError) as error:
             LOG.warning("Daemon cycle postponed: %s", error)
         time.sleep(max(interval, 1.0))

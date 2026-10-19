@@ -30,15 +30,22 @@ def handoff(cwd: str, db_path: str, cloud_url: str = "",
     project = resolve_project(cwd)
     if not project:
         return {"status": "missing", "reason": "not a Git project"}
+    remote = None
     if cloud_url and token:
         try:
-            return _cloud_handoff(cloud_url, token, project.project_id,
-                                  project.branch, task_id)
+            remote = _cloud_handoff(cloud_url, token, project.project_id,
+                                    project.branch, task_id)
         except (OSError, ValueError):
             pass
     with connect(db_path) as db:
         init_local(db)
-        return select_handoff(db, project.project_id, project.branch, task_id)
+        local = select_handoff(db, project.project_id, project.branch, task_id)
+    if remote and remote.get("status") == "ready":
+        if local.get("status") != "ready" or remote["handoff"]["updated_at"] > local["handoff"]["updated_at"]:
+            return remote
+    if remote and remote.get("status") == "ambiguous":
+        return remote
+    return local
 
 
 def hook_main() -> None:
@@ -54,7 +61,7 @@ def hook_main() -> None:
                          os.environ.get("AGENTSYNC_TASK_ID", ""))
         if result.get("status") == "ready":
             item = result["handoff"]
-            context = ("AgentSync Codex 接力上下文\n"
+            context = ("AgentSync 跨工具接力上下文\n"
                        "任务 ID：%s\n项目分支：%s\n当前 Git HEAD：%s\n来源事件：%s\n\n%s" %
                        (item["task_id"], item["branch"],
                         resolve_project(cwd).head,

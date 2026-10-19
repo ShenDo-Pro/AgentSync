@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentsync"
-version = "0.1.0"
-description = "Local-first Codex to CodeBuddy task handoff"
+version = "0.2.0"
+description = "Local-first cross-IDE message sharing and incremental cloud sync"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
